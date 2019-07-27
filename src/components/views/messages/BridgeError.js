@@ -14,9 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+import assert from 'assert';
+
 import React from 'react';
 import PropTypes from 'prop-types';
-import { EventTimeline } from 'matrix-js-sdk';
+import { EventTimeline, MatrixEvent, Room } from 'matrix-js-sdk';
 
 import { _t, _td } from '../../../languageHandler';
 
@@ -39,35 +41,203 @@ function assureArray(arr) {
     return Array.isArray(arr) ? arr : [];
 }
 
+// TODO[V02460@gmail.com]: The amount of work for such a simple thing is insane!
+class RelationsWatcher {
+    constructor(relationType, eventType, mxEvent, room) {
+        this.relationType = relationType;
+        this.eventType = eventType;
+
+        this.room = room;
+        this.mxEvent = mxEvent;
+        this.listenersAdded = false;
+        this.creationListenerTarget = null;
+        this.relations = null;
+        this.callbacks = [];
+
+        this._setup(mxEvent, room);
+    }
+
+    update(mxEvent, room) {
+        this.teardown();
+        this._setup(mxEvent, room);
+    }
+
+    teardown() {
+        if (!this.relations) {
+            return;
+        }
+        this._removeListeners(this.relations);
+        this._removeCreationListener();
+        // this.callbacks = [];
+        this.isSetup = false;
+
+        assert(!this.listenersAdded);
+        assert(!this.creationListenerTarget);
+    }
+
+    register(onChangeCallback) {
+        this.callbacks.push(onChangeCallback);
+    }
+
+    // WATCH REGISTRTION OBJECT CREATION
+
+    _creationCallback = () => {
+        this._removeCreationListener();
+        this._setup(this.mxEvent, this.room);
+    }
+
+    _addCreationListener(mxEvent) {
+        mxEvent.on("Event.relationsCreated", this._creationCallback);
+        this.creationListenerTarget = mxEvent;
+    }
+
+    _removeCreationListener() {
+        if (!this.creationListenerTarget) {
+            return;
+        }
+        this.creationListenerTarget.removeListeners(
+            "Event.relationsCreated",
+            this._creationCallback,
+        );
+        this.creationListenerTarget = null;
+    }
+
+    _setup(mxEvent, room) {
+        assert(!this.isSetup);
+        assert(!this.listenersAdded);
+
+        this.relations = this._getRelations(mxEvent, room);
+
+        if (!this.relations) {
+            // No setup happened. Wait for relations to appear.
+            this._addCreationListener(mxEvent);
+            return;
+        }
+        this._removeCreationListener();
+
+        this._addListeners(this.relations);
+
+        this.isSetup = true;
+
+        assert(this.listenersAdded);
+
+        this._notify();
+    }
+
+    _getRelations(mxEvent, room) {
+        const timelineSet = room.getUnfilteredTimelineSet();
+        // TODO[V02460]: Correct @returns to Optional in matrix-js-sdk.
+        return timelineSet.getRelationsForEvent(
+            mxEvent.getId(),
+            this.relationType,
+            this.eventType,
+        );
+    }
+
+    _getRelationsEvents() {
+        return this.relations.getRelations() || [];
+    }
+
+    _notify = () => {
+        const ret = this._getRelationsEvents();
+        this.callbacks.forEach(c => c.onChangeCallback(ret));
+    }
+
+    _addListeners(relations) {
+        if (this.listenersAdded) {
+            return;
+        }
+        relations.on("Relations.add", this._notify);
+        relations.on("Relations.remove", this._notify);
+        relations.on("Relations.redaction", this._notify);
+        this.listenersAdded = true;
+    }
+
+    _removeListeners(relations) {
+        if (!this.listenersAdded) {
+            return;
+        }
+        relations.removeListener("Relations.add", this._notify);
+        relations.removeListener("Relations.remove", this._notify);
+        relations.removeListener("Relations.redaction", this._notify);
+        this.listenersAdded = false;
+    }
+}
 
 export default class BridgeError extends React.PureComponent {
     static propTypes = {
-        mxEvent: PropTypes.object.isRequired,
-        room: PropTypes.object.isRequired,
+        mxEvent: PropTypes.instanceOf(MatrixEvent).isRequired,
+        room: PropTypes.instanceOf(Room).isRequired,
     };
 
     constructor(props) {
         super(props);
-        // this.state = {}
+
+        /** @type {errorEvents: MatrixEvent[]} */
+        this.state = {errorEvents: []};
+
+        this.relationsWatcher = new RelationsWatcher(
+            "m.reference",
+            "de.nasnotfound.bridge_error",
+            props.mxEvent,
+            props.room,
+        );
+        this.relationsWatcher.register((e) => this.setState({errorEvents: e}));
     }
+
+    // componentDidMount() {
+    //     this._setupChangeListeners();
+    // }
+
+    componentWillUnmount() {
+        this.relationsWatcher.teardown();
+        // this._teardownChangeListeners();
+    }
+
+    componentDidUpdate(prevProps) {
+        this.relationsWatcher.update(this.props.mxEvent, this.props.room);
+        // this._teardownChangeListeners(prevProps.relations);
+        // this._setupChangeListeners();
+    }
+
+    // _onErrorEventChange = () => {
+    //     this.setState({errorEvents: relations.getRelations()});
+    // }
+
+    // async _setupChangeListeners() {
+    //     this.relations = await this._getRelations();
+
+    //     this.relations.on("Relations.add", this.onErrorEventChange);
+    //     this.relations.on("Relations.remove", this.onErrorEventChange);
+    //     this.relations.on("Relations.redaction", this.onErrorEventChange);
+
+
+    //     this.listeners_added = true;
+    //     // Call once for initialization
+    //     this._onErrorEventChange();
+    // }
+
+    // _teardownChangeListeners(relations) {
+    //     relations.removeListener("Relations.add", this.onErrorEventChange);
+    //     relations.removeListener("Relations.remove", this.onErrorEventChange);
+    //     relations.removeListener("Relations.redaction", this.onErrorEventChange);
+    // }
 
     /**
      * Returns all bridge error relations for this event.
      *
-     * @returns {MatrixEvent[]}
+     * @returns {Promise<Relations>}
      */
-    _getRelations() {
+    async _getRelations() {
         const { mxEvent, room } = this.props;
 
         // const room = matrixClient.getRoom(mxEvent.getRoomId());
         const timelineSet = room.getUnfilteredTimelineSet();
-        const relations = timelineSet.getRelationsForEvent(
+        return timelineSet.getRelationsForEvent(
             mxEvent.getId(),
             "m.reference",
             "de.nasnotfound.bridge_error",
         );
-
-        return relations ? relations.getRelations() : [];
     }
 
     /**
@@ -103,10 +273,7 @@ export default class BridgeError extends React.PureComponent {
      * @returns {RelationInfo}
      */
     _getRelationInfo(relation) {
-        if (!relation.event || !relation.event.content) {
-            return { networkName: "", affectedUsers: [] };
-        }
-        const content = relation.event.content;
+        const content = relation.getContent();
 
         const affectedUsersRegex = assureArray(content.affected_users);
         const affectedUsers = affectedUsersRegex.flatMap(u =>
@@ -182,15 +349,15 @@ export default class BridgeError extends React.PureComponent {
     }
 
     render() {
-        const relations = this._getRelations();
-        const isBridgeError = !!relations.length;
+        const errorEvents = this.state.errorEvents;
+        const isBridgeError = !!errorEvents.length;
 
         if (!isBridgeError) {
             return null;
         }
 
-        const relationInfos = relations.map(r => this._getRelationInfo(r));
-        const renderedInfos = relationInfos.map(r => this._renderInfo(r));
+        const errorInfos = errorEvents.map(e => this._getRelationInfo(e));
+        const renderedInfos = errorInfos.map(e => this._renderInfo(e));
 
         return (
             <div className="mx_BridgeError">
