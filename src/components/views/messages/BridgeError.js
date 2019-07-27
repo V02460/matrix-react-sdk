@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import assert from 'assert';
+import { strict as assert } from 'assert';
 
 import React from 'react';
 import PropTypes from 'prop-types';
@@ -69,7 +69,7 @@ class RelationsWatcher {
         this._removeListeners(this.relations);
         this._removeCreationListener();
         // this.callbacks = [];
-        this.isSetup = false;
+        this.relations = null;
 
         assert(!this.listenersAdded);
         assert(!this.creationListenerTarget);
@@ -103,7 +103,7 @@ class RelationsWatcher {
     }
 
     _setup(mxEvent, room) {
-        assert(!this.isSetup);
+        assert(!this.relations);
         assert(!this.listenersAdded);
 
         this.relations = this._getRelations(mxEvent, room);
@@ -116,8 +116,6 @@ class RelationsWatcher {
         this._removeCreationListener();
 
         this._addListeners(this.relations);
-
-        this.isSetup = true;
 
         assert(this.listenersAdded);
 
@@ -140,7 +138,7 @@ class RelationsWatcher {
 
     _notify = () => {
         const ret = this._getRelationsEvents();
-        this.callbacks.forEach(c => c.onChangeCallback(ret));
+        this.callbacks.forEach(callback => callback(ret));
     }
 
     _addListeners(relations) {
